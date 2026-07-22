@@ -1046,6 +1046,9 @@
                 }
             }
 
+            // Sync backlog controls with host status
+            renderBacklog();
+
             const playersList = Object.values(state.playersMap);
             const activeVoters = playersList.filter(p => p.role === 'Voter');
             const votedCount = activeVoters.filter(p => p.vote !== null).length;
@@ -1211,7 +1214,38 @@
 
         function renderBacklog() {
             const list = document.getElementById('backlogItemsList');
+            if (!list) return;
             list.innerHTML = '';
+
+            const host = isHost();
+
+            // Host-only controls for active story and backlog management
+            const storyInput = document.getElementById('storyTitleInput');
+            if (storyInput) {
+                storyInput.readOnly = !host;
+                if (!host) {
+                    storyInput.classList.add('cursor-default', 'select-none');
+                    storyInput.setAttribute('title', 'Only the Room Host can edit the active story title');
+                } else {
+                    storyInput.classList.remove('cursor-default', 'select-none');
+                    storyInput.removeAttribute('title');
+                }
+            }
+
+            const nextBtn = document.getElementById('nextStoryBtn');
+            if (nextBtn) {
+                if (host) nextBtn.classList.remove('hidden'); else nextBtn.classList.add('hidden');
+            }
+
+            const addBtn = document.getElementById('addStoryBtn');
+            if (addBtn) {
+                if (host) addBtn.classList.remove('hidden'); else addBtn.classList.add('hidden');
+            }
+
+            const acceptBtn = document.getElementById('acceptScoreBtn');
+            if (acceptBtn) {
+                if (host) acceptBtn.classList.remove('hidden'); else acceptBtn.classList.add('hidden');
+            }
 
             let estimatedCount = 0;
             let totalPoints = 0;
@@ -1226,10 +1260,12 @@
                 const card = document.createElement('div');
                 const isCurrentActive = state.activeStory === `${item.key}: ${item.title}` || state.activeStory === item.title || state.activeStory === item.key;
 
-                card.className = `p-3 rounded-xl border text-xs flex flex-col gap-1.5 transition-all cursor-pointer ${
+                card.className = `p-3 rounded-xl border text-xs flex flex-col gap-1.5 transition-all ${
+                    host ? 'cursor-pointer' : 'cursor-default'
+                } ${
                     isCurrentActive 
                         ? 'bg-blue-600/15 border-blue-500 text-white shadow-md shadow-blue-500/10 ring-1 ring-blue-500/50' 
-                        : 'bg-slate-950/60 border-slate-800/80 text-slate-300 hover:border-slate-700 hover:bg-slate-900/60'
+                        : 'bg-slate-950/60 border-slate-800/80 text-slate-300 ' + (host ? 'hover:border-slate-700 hover:bg-slate-900/60' : '')
                 }`;
 
                 card.innerHTML = `
@@ -1241,21 +1277,23 @@
                     </div>
                     <p class="font-medium truncate">${item.title}</p>
                     <div class="flex items-center justify-between mt-0.5 pt-1.5 border-t border-slate-800/50">
-                        <span class="text-[10px] text-slate-400">Click to estimate</span>
+                        <span class="text-[10px] text-slate-400">${host ? 'Click to estimate' : 'Backlog Item'}</span>
                         ${isCurrentActive 
                             ? '<span class="text-[10px] text-emerald-400 font-bold flex items-center gap-1"><i class="fa-solid fa-play text-[8px]"></i> Active</span>' 
-                            : '<span class="text-[10px] text-blue-400 hover:underline">Select</span>'}
+                            : (host ? '<span class="text-[10px] text-blue-400 hover:underline">Select</span>' : '<span class="text-[10px] text-slate-500">Read Only</span>')}
                     </div>
                 `;
 
-                card.addEventListener('click', () => {
-                    state.activeStory = `${item.key}: ${item.title}`;
-                    document.getElementById('storyTitleInput').value = state.activeStory;
-                    resetRound();
-                    renderBacklog();
-                    syncStateToCloud();
-                    showToast(`Active story set to ${item.key}`, 'info');
-                });
+                if (host) {
+                    card.addEventListener('click', () => {
+                        state.activeStory = `${item.key}: ${item.title}`;
+                        document.getElementById('storyTitleInput').value = state.activeStory;
+                        resetRound();
+                        renderBacklog();
+                        syncStateToCloud();
+                        showToast(`Active story set to ${item.key}`, 'info');
+                    });
+                }
 
                 list.appendChild(card);
             });
@@ -1343,6 +1381,11 @@
         }
 
         function selectNextStory() {
+            if (!isHost()) {
+                showToast('Only the Room Host can switch active stories.', 'warning');
+                return;
+            }
+
             const nextUnestimated = state.backlog.find(b => b.estimate === null && `${b.key}: ${b.title}` !== state.activeStory);
             const target = nextUnestimated || state.backlog.find(b => `${b.key}: ${b.title}` !== state.activeStory);
             
@@ -1524,6 +1567,7 @@
 
             // Save score to backlog & advance
             document.getElementById('acceptScoreBtn').addEventListener('click', () => {
+                if (!isHost()) return;
                 const avg = document.getElementById('statAverage').textContent;
                 const currentTitle = document.getElementById('storyTitleInput').value;
                 
@@ -1542,11 +1586,15 @@
 
             // Backlog Story Modal
             const addStoryModal = document.getElementById('addStoryModal');
-            document.getElementById('addStoryBtn').addEventListener('click', () => addStoryModal.classList.remove('hidden'));
+            document.getElementById('addStoryBtn').addEventListener('click', () => {
+                if (!isHost()) return;
+                addStoryModal.classList.remove('hidden');
+            });
             document.getElementById('closeAddStoryModal').addEventListener('click', () => addStoryModal.classList.add('hidden'));
 
             document.getElementById('addStoryForm').addEventListener('submit', (e) => {
                 e.preventDefault();
+                if (!isHost()) return;
                 const key = document.getElementById('inputStoryKey').value.trim();
                 const title = document.getElementById('inputStoryTitle').value.trim();
                 if (key && title) {
@@ -1566,6 +1614,7 @@
             });
 
             document.getElementById('storyTitleInput').addEventListener('change', (e) => {
+                if (!isHost()) return;
                 state.activeStory = e.target.value;
                 renderBacklog();
                 syncStateToCloud();
