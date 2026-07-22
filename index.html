@@ -461,6 +461,7 @@
             isHost: false,
             hostConn: null,
             hasRestoredSession: false,
+            hasJoinedRoom: false,
             lastUpdatedAt: 0
         };
 
@@ -490,6 +491,7 @@
                 
                 if (isTabSessionActive) {
                     state.hasRestoredSession = true;
+                    state.hasJoinedRoom = true;
                     if (activeTabRoom) {
                         state.roomId = activeTabRoom;
                     }
@@ -528,6 +530,11 @@
                                 state.playersMap[id] = parsed.playersMap[id];
                             }
                         });
+                    }
+                    // Guard: Default to voting mode if no active votes exist in cached data
+                    const hasVotes = Object.values(state.playersMap).some(p => p.vote !== null);
+                    if (!hasVotes) {
+                        state.phase = 'voting';
                     }
                 }
             } catch (e) {
@@ -602,7 +609,9 @@
             conn.on('open', () => {
                 state.isHost = false;
                 state.hostConn = conn;
-                conn.send({ type: 'JOIN', user: state.user });
+                if (state.hasJoinedRoom) {
+                    conn.send({ type: 'JOIN', user: state.user });
+                }
             });
 
             conn.on('data', (data) => {
@@ -729,7 +738,7 @@
 
             // Heartbeat loop: refreshes user timestamp and broadcasts presence every 2.5s
             setInterval(() => {
-                if (state.user.id && state.user.name) {
+                if (state.hasJoinedRoom && state.user.id && state.user.name) {
                     state.user.lastActive = Date.now();
                     state.playersMap[state.user.id] = { ...state.user };
 
@@ -755,8 +764,8 @@
 
         function pruneInactivePlayers() {
             const now = Date.now();
-            // Always preserve self in playersMap
-            if (state.user.id && state.user.name) {
+            // Preserve self in playersMap only if joined
+            if (state.hasJoinedRoom && state.user.id && state.user.name) {
                 state.playersMap[state.user.id] = { ...state.user };
             }
             Object.keys(state.playersMap).forEach(id => {
@@ -793,7 +802,7 @@
         }
 
         async function syncStateToCloud() {
-            if (!state.user.name) return;
+            if (!state.hasJoinedRoom || !state.user.name) return;
             state.user.lastActive = Date.now();
             state.playersMap[state.user.id] = { ...state.user };
 
@@ -891,16 +900,24 @@
                             name: state.user.name || mergedPlayer.name,
                             vote: state.user.vote !== null ? state.user.vote : mergedPlayer.vote
                         };
-                        state.playersMap[id] = { ...state.user };
+                        if (state.hasJoinedRoom) {
+                            state.playersMap[id] = { ...state.user };
+                        }
                     } else {
                         state.playersMap[id] = mergedPlayer;
                     }
                 });
 
-                if (state.user.id && state.user.name) {
+                if (state.hasJoinedRoom && state.user.id && state.user.name) {
                     state.playersMap[state.user.id] = { ...state.user };
                 }
                 pruneInactivePlayers();
+            }
+
+            // Guard: Reset to voting mode if phase is revealed but 0 votes exist
+            const activeVoterCount = Object.values(state.playersMap).filter(p => p.role === 'Voter' && p.vote !== null).length;
+            if (state.phase === 'revealed' && activeVoterCount === 0) {
+                state.phase = 'voting';
             }
 
             renderTable();
@@ -961,6 +978,11 @@
             const playersList = Object.values(state.playersMap);
             const activeVoters = playersList.filter(p => p.role === 'Voter');
             const votedCount = activeVoters.filter(p => p.vote !== null).length;
+
+            // Auto-guard: Reset phase to 'voting' if 0 votes are present
+            if (state.phase === 'revealed' && votedCount === 0) {
+                state.phase = 'voting';
+            }
 
             const tableStatusTitle = document.getElementById('tableStatusTitle');
             const tableStatusDetail = document.getElementById('tableStatusDetail');
@@ -1358,6 +1380,7 @@
                     state.user.role = role;
                     state.user.color = getAutoAvatarColor(name);
                     state.user.lastActive = Date.now();
+                    state.hasJoinedRoom = true;
 
                     saveUserProfileToLocal(state.user);
                     
@@ -1372,6 +1395,8 @@
                         } else {
                             setupPeerJS();
                         }
+                    } else if (state.hostConn && state.hostConn.open) {
+                        state.hostConn.send({ type: 'JOIN', user: state.user });
                     }
 
                     document.getElementById('userNameDisplay').textContent = name;
