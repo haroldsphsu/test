@@ -29,8 +29,6 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <!-- Tone.js for Sound Effects -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
-    <!-- Canvas Confetti -->
-    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
     <!-- PeerJS for Zero-Config Remote WebRTC Internet Sync -->
     <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 
@@ -524,6 +522,7 @@
                     if (parsed.deckType) state.deckType = parsed.deckType;
                     if (parsed.activeStory) state.activeStory = parsed.activeStory;
                     if (parsed.backlog && Array.isArray(parsed.backlog)) state.backlog = parsed.backlog;
+                    if (parsed.hostId) state.hostId = parsed.hostId;
                     
                     let hasVotes = false;
                     if (parsed.playersMap) {
@@ -535,6 +534,10 @@
                                 }
                             }
                         });
+                        // Restore local user's vote from cached playersMap if available
+                        if (state.user.id && parsed.playersMap[state.user.id] && parsed.playersMap[state.user.id].vote !== undefined) {
+                            state.user.vote = parsed.playersMap[state.user.id].vote;
+                        }
                     }
 
                     // Only preserve revealed phase if active non-null votes exist
@@ -722,12 +725,16 @@
         // Host Determination Helper
         function isHost() {
             if (state.isHost) return true;
-            if (state.hostId && state.hostId === state.user.id) return true;
+            if (state.hostId && state.user.id) {
+                return state.hostId === state.user.id;
+            }
             
-            // Fallback: Default host to the first active player in the sorted roster
-            const activePlayerIds = Object.keys(state.playersMap).filter(id => state.playersMap[id]).sort();
-            if (activePlayerIds.length > 0 && activePlayerIds[0] === state.user.id) {
-                return true;
+            // Fallback: lowest sorted active player ID who has joined
+            if (!state.hasJoinedRoom || !state.user.id) return false;
+            
+            const activePlayerIds = Object.keys(state.playersMap).filter(id => state.playersMap[id] && state.playersMap[id].name).sort();
+            if (activePlayerIds.length > 0) {
+                return activePlayerIds[0] === state.user.id;
             }
             return false;
         }
@@ -852,9 +859,14 @@
         }
 
         function getRoomPayload() {
+            const currentIsHost = isHost();
+            if (currentIsHost && !state.hostId && state.user.id) {
+                state.hostId = state.user.id;
+            }
+
             return {
                 roomId: state.roomId,
-                hostId: state.hostId || (isHost() ? state.user.id : null),
+                hostId: state.hostId || (currentIsHost ? state.user.id : null),
                 deckType: state.deckType,
                 phase: state.phase,
                 activeStory: state.activeStory,
@@ -867,8 +879,11 @@
         function handleRemoteData(data) {
             if (!data) return;
 
+            // Preserve active room hostId; only update if unset or current host disconnected
             if (data.hostId) {
-                state.hostId = data.hostId;
+                if (!state.hostId || !state.playersMap[state.hostId] || data.hostId === state.hostId) {
+                    state.hostId = data.hostId;
+                }
             }
 
             // Reject stale sync payloads to prevent resetting state (e.g. revealed -> voting)
@@ -893,11 +908,11 @@
                     };
 
                     if (id === state.user.id) {
+                        // Crucial: Preserve local user profile settings (e.g. Observer role & name) over remote payloads
                         state.user = { 
-                            ...state.user, 
                             ...mergedPlayer,
-                            name: state.user.name || mergedPlayer.name,
-                            vote: state.user.vote !== null ? state.user.vote : mergedPlayer.vote
+                            ...state.user,
+                            vote: state.user.role === 'Observer' ? null : (state.user.vote !== null ? state.user.vote : mergedPlayer.vote)
                         };
                         if (state.hasJoinedRoom) {
                             state.playersMap[id] = { ...state.user };
@@ -936,7 +951,6 @@
             if (data.deckType && data.deckType !== state.deckType) {
                 state.deckType = data.deckType;
                 document.getElementById('deckTypeSelect').value = data.deckType;
-                renderHand();
             }
 
             if (data.activeStory && data.activeStory !== state.activeStory) {
@@ -950,6 +964,7 @@
                 renderBacklog();
             }
 
+            renderHand();
             renderTable();
             if (state.phase === 'revealed') {
                 renderDistribution();
@@ -961,15 +976,16 @@
         function renderHand() {
             const container = document.getElementById('cardsHandContainer');
             const label = document.getElementById('currentSelectionLabel');
+            if (!container || !label) return;
             container.innerHTML = '';
 
             // Hide cards for Observers and display status banner
             if (state.user.role === 'Observer') {
                 label.textContent = 'Observer Mode';
                 container.innerHTML = `
-                    <div class="py-4 px-6 text-center text-slate-400 text-xs rounded-xl bg-slate-950/60 border border-slate-800/80 w-full flex items-center justify-center gap-2">
-                        <i class="fa-solid fa-eye text-blue-400 text-sm"></i>
-                        <span>You are in <strong>Observer</strong> mode. Voting cards are disabled for observers.</span>
+                    <div class="py-5 px-6 text-center text-slate-400 text-xs sm:text-sm rounded-xl bg-slate-950/80 border border-slate-800/80 w-full flex items-center justify-center gap-3">
+                        <i class="fa-solid fa-eye text-blue-400 text-lg"></i>
+                        <span>You are in <strong>Observer</strong> mode. Voting cards are disabled.</span>
                     </div>
                 `;
                 return;
@@ -1133,7 +1149,6 @@
 
             if (allSame) {
                 consensusEl.innerHTML = '<span class="text-emerald-400 font-bold"><i class="fa-solid fa-circle-check"></i> High</span>';
-                triggerConfetti();
             } else {
                 const max = Math.max(...votes);
                 const min = Math.min(...votes);
@@ -1341,12 +1356,6 @@
             resetRound();
         }
 
-        function triggerConfetti() {
-            if (typeof confetti === 'function') {
-                confetti({ particleCount: 70, spread: 60, origin: { y: 0.7 } });
-            }
-        }
-
         function showToast(msg, type = 'info') {
             const container = document.getElementById('toastContainer');
             const toast = document.createElement('div');
@@ -1413,7 +1422,11 @@
                 document.getElementById('userAvatar').textContent = state.user.name.charAt(0).toUpperCase();
                 document.getElementById('userAvatar').className = `w-7 h-7 rounded-full ${state.user.color} text-white font-bold text-xs flex items-center justify-center`;
                 
-                state.playersMap[state.user.id] = state.user;
+                // Preserve restored vote if already set from local cache
+                if (state.playersMap[state.user.id] && state.playersMap[state.user.id].vote !== undefined && state.user.vote === null) {
+                    state.user.vote = state.playersMap[state.user.id].vote;
+                }
+                state.playersMap[state.user.id] = { ...state.user };
                 document.getElementById('profileModal').classList.add('hidden');
                 
                 setupFirebase();
@@ -1436,6 +1449,9 @@
                 if (name && newRoomId) {
                     state.user.name = name;
                     state.user.role = role;
+                    if (role === 'Observer') {
+                        state.user.vote = null;
+                    }
                     state.user.color = getAutoAvatarColor(name);
                     state.user.lastActive = Date.now();
                     state.hasJoinedRoom = true;
