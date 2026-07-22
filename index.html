@@ -432,6 +432,7 @@
             appId: typeof __app_id !== 'undefined' ? __app_id : 'scrum-poker-app',
             roomId: 'sprint-42',
             userId: 'usr_' + Math.random().toString(36).substring(2, 9),
+            hostId: null,
             user: {
                 id: null,
                 name: '',
@@ -718,6 +719,19 @@
             `;
         }
 
+        // Host Determination Helper
+        function isHost() {
+            if (state.isHost) return true;
+            if (state.hostId && state.hostId === state.user.id) return true;
+            
+            // Fallback: Default host to the first active player in the sorted roster
+            const activePlayerIds = Object.keys(state.playersMap).filter(id => state.playersMap[id]).sort();
+            if (activePlayerIds.length > 0 && activePlayerIds[0] === state.user.id) {
+                return true;
+            }
+            return false;
+        }
+
         // Global Presence Heartbeat Engine - Always runs to keep idle/non-voting users active
         function startGlobalHeartbeat() {
             // Unconditionally listen for local BroadcastChannel messages across tabs
@@ -840,6 +854,7 @@
         function getRoomPayload() {
             return {
                 roomId: state.roomId,
+                hostId: state.hostId || (isHost() ? state.user.id : null),
                 deckType: state.deckType,
                 phase: state.phase,
                 activeStory: state.activeStory,
@@ -851,6 +866,10 @@
 
         function handleRemoteData(data) {
             if (!data) return;
+
+            if (data.hostId) {
+                state.hostId = data.hostId;
+            }
 
             // Reject stale sync payloads to prevent resetting state (e.g. revealed -> voting)
             if (data.updatedAt && state.lastUpdatedAt && data.updatedAt < state.lastUpdatedAt) {
@@ -941,7 +960,21 @@
 
         function renderHand() {
             const container = document.getElementById('cardsHandContainer');
+            const label = document.getElementById('currentSelectionLabel');
             container.innerHTML = '';
+
+            // Hide cards for Observers and display status banner
+            if (state.user.role === 'Observer') {
+                label.textContent = 'Observer Mode';
+                container.innerHTML = `
+                    <div class="py-4 px-6 text-center text-slate-400 text-xs rounded-xl bg-slate-950/60 border border-slate-800/80 w-full flex items-center justify-center gap-2">
+                        <i class="fa-solid fa-eye text-blue-400 text-sm"></i>
+                        <span>You are in <strong>Observer</strong> mode. Voting cards are disabled for observers.</span>
+                    </div>
+                `;
+                return;
+            }
+
             const cards = DECKS[state.deckType] || DECKS.fibonacci;
 
             cards.forEach(val => {
@@ -963,12 +996,13 @@
                 container.appendChild(cardEl);
             });
 
-            document.getElementById('currentSelectionLabel').textContent = state.user.vote 
+            label.textContent = state.user.vote 
                 ? `Selected: Card "${state.user.vote}"` 
                 : 'No card selected';
         }
 
         function castVote(val) {
+            if (state.user.role === 'Observer') return;
             if (state.phase === 'revealed') return;
             state.user.vote = val;
             state.playersMap[state.user.id] = state.user;
@@ -985,6 +1019,16 @@
             const bottomSeatsRow = document.getElementById('bottomSeatsRow');
             topSeatsRow.innerHTML = '';
             bottomSeatsRow.innerHTML = '';
+
+            // Host Control UI Visibility: Show "Reveal Cards" button ONLY to Room Host
+            const revealBtn = document.getElementById('revealBtn');
+            if (revealBtn) {
+                if (isHost()) {
+                    revealBtn.classList.remove('hidden');
+                } else {
+                    revealBtn.classList.add('hidden');
+                }
+            }
 
             const playersList = Object.values(state.playersMap);
             const activeVoters = playersList.filter(p => p.role === 'Voter');
@@ -1206,6 +1250,11 @@
         }
 
         function revealCards() {
+            if (!isHost()) {
+                showToast('Only the Room Host can reveal cards.', 'warning');
+                return;
+            }
+
             state.phase = 'revealed';
             state.lastUpdatedAt = Date.now();
             sound.playReveal();
