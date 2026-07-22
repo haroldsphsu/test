@@ -701,7 +701,11 @@
                 <span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
                 <span>Local Multi-Tab Sync</span>
             `;
+        }
 
+        // Global Presence Heartbeat Engine - Always runs to keep idle/non-voting users active
+        function startGlobalHeartbeat() {
+            // Unconditionally listen for local BroadcastChannel messages across tabs
             channel.onmessage = (event) => {
                 if (event.data?.type === 'REQUEST_STATE') {
                     syncStateToCloud();
@@ -709,7 +713,7 @@
                     state.playersMap[event.data.user.id] = event.data.user;
                     pruneInactivePlayers();
                     renderTable();
-                } else {
+                } else if (event.data?.roomId === state.roomId) {
                     handleRemoteData(event.data);
                 }
             };
@@ -723,25 +727,30 @@
                 }
             });
 
-            // Heartbeat loop to keep active presence alive without resetting room state
+            // Heartbeat loop: refreshes user timestamp and broadcasts presence every 2.5s
             setInterval(() => {
                 if (state.user.id && state.user.name) {
                     state.user.lastActive = Date.now();
                     state.playersMap[state.user.id] = { ...state.user };
-                    
+
+                    pruneInactivePlayers();
+
+                    // Broadcast via PeerJS if connected to host or hosting
                     if (state.hostConn && state.hostConn.open) {
                         state.hostConn.send({ type: 'USER_HEARTBEAT', user: state.user });
                     }
-                    
-                    pruneInactivePlayers();
-                    
-                    if (!state.isHost) {
-                        channel.postMessage({ type: 'USER_HEARTBEAT', user: state.user });
-                    } else {
+
+                    // Always post to BroadcastChannel for instant local tab discovery
+                    channel.postMessage({ type: 'USER_HEARTBEAT', user: state.user });
+
+                    if (state.isHost) {
+                        broadcastHostState();
+                    } else if (state.db && state.auth?.currentUser) {
+                        // Periodic cloud heartbeat for Firebase sessions
                         syncStateToCloud();
                     }
                 }
-            }, 3000);
+            }, 2500);
         }
 
         function pruneInactivePlayers() {
@@ -1314,6 +1323,9 @@
                 document.getElementById('inputUserName').value = state.user.name;
                 document.getElementById('inputUserRole').value = state.user.role;
             }
+
+            // Start global heartbeat loop for uninterrupted non-voter presence
+            startGlobalHeartbeat();
 
             // Auto-rejoin ONLY if this tab is being refreshed (hasRestoredSession is true)
             if (state.hasRestoredSession && state.user.name) {
